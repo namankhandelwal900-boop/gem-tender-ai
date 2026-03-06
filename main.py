@@ -192,23 +192,750 @@ async def refresh_tenders():
 
 @app.on_event("startup")
 async def startup():
+    """Load tenders - instant fallback first, then background scrape"""
     global TENDERS_DB, LAST_SCRAPED
+    # Instantly load fallback so /health passes immediately
     TENDERS_DB = get_fallback_tenders()
     LAST_SCRAPED = datetime.utcnow()
+    logger.info(f"✅ {len(TENDERS_DB)} tenders loaded instantly")
+    # Try live scrape in background - won't block startup
     asyncio.create_task(refresh_tenders())
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+GEM_HTML = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>GEM Tender AI — Intelligence Terminal</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#08090b;color:#e8d5a3;font-family:'Courier New',monospace;min-height:100vh;overflow-x:hidden;}
+::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:#0a0c0f;}::-webkit-scrollbar-thumb{background:#2a2f38;}
+a{color:inherit;text-decoration:none;}
+
+/* TOP BAR */
+#topbar{background:#0b0d10;border-bottom:2px solid #f5a623;padding:0 20px;display:flex;align-items:center;justify-content:space-between;height:46px;position:sticky;top:0;z-index:200;}
+.logo{background:#f5a623;color:#000;font-weight:900;font-size:14px;padding:5px 14px;letter-spacing:2px;cursor:pointer;}
+.topbar-center{color:#333;font-size:11px;letter-spacing:3px;}
+.topbar-right{display:flex;align-items:center;gap:16px;font-size:11px;}
+.live-badge{color:#4ade80;font-size:11px;animation:blink 2s infinite;}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:.4;}}
+.plan-pill{border:1px solid #f5a623;color:#f5a623;padding:2px 10px;font-size:10px;letter-spacing:1px;}
+.settings-btn{background:none;border:1px solid #333;color:#666;padding:3px 10px;font-family:inherit;font-size:10px;cursor:pointer;letter-spacing:1px;}
+.settings-btn:hover{border-color:#f5a623;color:#f5a623;}
+
+/* TICKER */
+#ticker{background:#0b0d10;border-bottom:1px solid #1a1f26;padding:5px 20px;display:flex;gap:30px;overflow-x:auto;white-space:nowrap;}
+.tick{font-size:11px;}.tick-l{color:#444;}.tick-v{color:#f5a623;font-weight:bold;}.tick-u{color:#4ade80;font-size:10px;}.tick-d{color:#f87171;font-size:10px;}
+
+/* TABS */
+#navtabs{background:#0b0d10;border-bottom:1px solid #1a1f26;display:flex;padding:0 20px;overflow-x:auto;}
+.tab{background:none;border:none;border-bottom:2px solid transparent;color:#444;font-family:inherit;font-size:11px;letter-spacing:1.5px;padding:11px 18px;cursor:pointer;white-space:nowrap;transition:all .15s;}
+.tab.on{border-bottom-color:#f5a623;color:#f5a623;font-weight:700;}
+.tab:hover:not(.on){color:#888;}
+.tab .badge{background:#f87171;color:#000;font-size:9px;padding:1px 5px;margin-left:4px;font-weight:700;}
+
+/* CONTENT */
+#content{padding:16px 20px;}
+
+/* INPUTS */
+input,select{background:#0f1318;border:1px solid #1f2630;color:#e8d5a3;padding:8px 12px;font-family:inherit;font-size:12px;outline:none;transition:border .15s;}
+input:focus,select:focus{border-color:#f5a623;}
+input::placeholder{color:#333;}
+
+/* TABLE */
+.tbl-wrap{overflow-x:auto;}
+.tbl-head{display:grid;background:#0f1318;padding:7px 14px;font-size:10px;color:#444;letter-spacing:1px;border:1px solid #1a1f26;border-bottom:none;gap:6px;}
+.trow{display:grid;padding:9px 14px;gap:6px;border-bottom:1px solid #111;cursor:pointer;font-size:11px;transition:background .1s;align-items:center;}
+.trow:hover{background:#0d1117;}
+.trow.sel{background:#0e1a0a;border-left:2px solid #f5a623;}
+.c-id{color:#5b9bd5;font-size:10px;font-family:'Courier New',monospace;}
+.c-dept{color:#c9b99a;font-size:11px;}
+.c-prod{color:#fff;font-weight:600;}
+.c-val{color:#4ade80;font-weight:700;}
+.c-emd{color:#fbbf24;}
+.c-dl{color:#888;font-size:10px;}
+.c-dl.soon{color:#f87171;font-weight:700;}
+.c-src{font-size:9px;padding:2px 6px;border-radius:2px;}
+.src-live{background:#052e16;color:#4ade80;border:1px solid #166534;}
+.src-demo{background:#1c1009;color:#f5a623;border:1px solid #92400e;}
+
+/* BUTTONS */
+.btn{border:none;font-family:inherit;cursor:pointer;letter-spacing:.5px;transition:all .15s;}
+.btn-ai{background:#f5a623;color:#000;font-size:10px;font-weight:900;padding:5px 11px;}
+.btn-ai:hover{background:#fbbf24;}
+.btn-outline{background:none;border:1px solid #f5a623;color:#f5a623;font-size:10px;padding:6px 14px;}
+.btn-outline:hover{background:#1a1200;}
+.btn-green{background:none;border:1px solid #4ade80;color:#4ade80;font-size:10px;padding:6px 14px;}
+.btn-green:hover{background:#052e16;}
+.btn-blue{background:none;border:1px solid #60a5fa;color:#60a5fa;font-size:10px;padding:6px 14px;}
+.btn-red{background:#dc2626;color:#fff;font-size:11px;padding:8px 18px;font-weight:700;}
+.btn-red:hover{background:#b91c1c;}
+
+/* PANELS */
+.panel{border:1px solid #1a1f26;background:#0d1117;padding:14px;}
+.panel-title{color:#f5a623;font-size:10px;letter-spacing:2px;margin-bottom:12px;text-transform:uppercase;}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
+.grid4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;}
+
+/* STAT CARDS */
+.scard{border:1px solid #1a1f26;background:#0d1117;padding:14px;text-align:center;}
+.scard-label{color:#444;font-size:10px;letter-spacing:1.5px;margin-bottom:6px;}
+.scard-val{font-weight:900;font-size:24px;}
+
+/* LOADING SPINNER */
+.loader{text-align:center;padding:60px;color:#f5a623;}
+.spin{display:inline-block;animation:rot 1s linear infinite;font-size:30px;}
+@keyframes rot{to{transform:rotate(360deg)}}
+
+/* SELECTED TENDER STRIP */
+#sel-strip{border:1px solid #f5a623;background:#0d1117;padding:14px 18px;margin-top:14px;display:grid;grid-template-columns:1fr 1fr auto;gap:16px;align-items:center;}
+
+/* AI ANALYSIS */
+.verdict-card{border:1px solid #166534;background:#071a0c;padding:16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:flex-start;}
+.verdict-card.risky{border-color:#92400e;background:#170e00;}
+.verdict-card.avoid{border-color:#7f1d1d;background:#180a0a;}
+.verdict-text{font-size:20px;font-weight:900;}
+.ai-score-num{font-size:42px;font-weight:900;color:#f5a623;line-height:1;}
+.kpoint{font-size:11px;color:#d1d5db;margin-bottom:7px;padding-left:14px;position:relative;}
+.kpoint::before{content:"▸";color:#4ade80;position:absolute;left:0;}
+.tip-bar{border-left:3px solid #f5a623;background:#110e00;padding:10px 14px;margin-top:12px;font-size:11px;color:#e8d5a3;}
+
+/* ELIGIBILITY */
+.erow{border:1px solid #1a1f26;background:#0d1117;padding:12px 16px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;}
+.erow.fail{border-color:#7f1d1d;background:#0f0606;}
+.echk{width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:15px;}
+.pass-chk{background:#052e16;border:1px solid #166534;color:#4ade80;}
+.fail-chk{background:#450a0a;border:1px solid #7f1d1d;color:#f87171;}
+
+/* PRICE ROWS */
+.prow{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid #1a1f26;margin-bottom:3px;cursor:pointer;transition:all .15s;}
+.prow.rec{border-color:#166534;background:#071a0c;}
+.prow:hover:not(.rec){border-color:#2a2f38;}
+.pbar-bg{flex:1;height:10px;background:#1a1f26;}
+.pbar-fill{height:100%;transition:width .4s;}
+
+/* ALERTS */
+.arow{border-left:3px solid #555;background:#0d1117;padding:10px 16px;margin-bottom:3px;display:flex;gap:14px;font-size:11px;align-items:flex-start;}
+.arow.match{border-left-color:#4ade80;}
+.arow.urgent{border-left-color:#f87171;}
+.arow.info{border-left-color:#60a5fa;}
+.arow.price{border-left-color:#c084fc;}
+
+/* BIDS */
+.bid-won{color:#4ade80;font-weight:700;}
+.bid-lost{color:#f87171;font-weight:700;}
+.bid-pend{color:#f5a623;font-weight:700;}
+
+/* MODAL */
+#apimodal{position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:999;display:flex;align-items:center;justify-content:center;}
+.mbox{background:#0d1117;border:1px solid #f5a623;padding:32px;width:460px;max-width:96vw;}
+.mtitle{color:#f5a623;font-size:14px;letter-spacing:2px;margin-bottom:6px;}
+.msub{color:#555;font-size:11px;margin-bottom:20px;line-height:1.6;}
+.msave{background:#f5a623;color:#000;border:none;width:100%;padding:11px;font-family:inherit;font-weight:900;font-size:12px;cursor:pointer;letter-spacing:1px;margin-top:4px;}
+.msave:hover{background:#fbbf24;}
+.mskip{background:none;border:none;color:#444;font-family:inherit;font-size:11px;cursor:pointer;text-decoration:underline;margin-top:10px;display:block;text-align:center;}
+
+/* UPDATE TOAST */
+#toast{position:fixed;bottom:20px;right:20px;background:#0d1117;border:1px solid #4ade80;color:#4ade80;padding:10px 18px;font-size:11px;z-index:500;opacity:0;transition:opacity .3s;pointer-events:none;}
+#toast.show{opacity:1;}
+
+/* REFRESH BAR */
+#refresh-bar{background:#071a0c;border-bottom:1px solid #166534;padding:5px 20px;font-size:10px;color:#4ade80;display:flex;justify-content:space-between;align-items:center;}
+</style>
+</head>
+<body>
+
+<!-- API KEY MODAL -->
+<div id="apimodal">
+  <div class="mbox">
+    <div class="mtitle">⚡ GEM TENDER AI — SETUP</div>
+    <div class="msub">Enter your Anthropic API key to activate AI analysis features.<br/>Your key is stored only in your browser. Never sent to any 3rd party.</div>
+    <input id="ki" type="password" placeholder="sk-ant-api03-xxxxxxxxxxxx" style="width:100%;margin-bottom:8px;font-size:13px;padding:10px;"/>
+    <button class="msave" onclick="saveKey()">ACTIVATE AI & LAUNCH →</button>
+    <button class="mskip" onclick="closeModal()">Continue in demo mode (no AI analysis)</button>
+    <div style="color:#333;font-size:10px;margin-top:14px;line-height:1.6;">
+      Get key: console.anthropic.com → API Keys → Create Key<br/>
+      ⚠ Never share your API key with anyone.
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast">✓ Tenders updated</div>
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <div style="display:flex;align-items:center;gap:16px;">
+    <div class="logo">GEM·AI</div>
+    <span class="topbar-center">TENDER INTELLIGENCE TERMINAL</span>
+  </div>
+  <div class="topbar-right">
+    <span class="live-badge">● LIVE</span>
+    <span id="clock" style="color:#555;font-size:11px;">--:--:--</span>
+    <button class="settings-btn" onclick="openModal()">⚙ API KEY</button>
+    <span class="plan-pill" id="plan-pill">DEMO</span>
+  </div>
+</div>
+
+<!-- REFRESH BAR -->
+<div id="refresh-bar">
+  <span>🔄 Data auto-refreshes every 60 min from GeM portal · <span id="last-update">Loading...</span></span>
+  <button onclick="forceRefresh()" style="background:none;border:1px solid #4ade80;color:#4ade80;font-family:inherit;font-size:10px;padding:2px 10px;cursor:pointer;">REFRESH NOW</button>
+</div>
+
+<!-- TICKER -->
+<div id="ticker">
+  <div class="tick"><span class="tick-l">OPEN TENDERS </span><span class="tick-v" id="t-open">–</span></div>
+  <div class="tick"><span class="tick-l">CLOSING 48H </span><span class="tick-v" id="t-close" style="color:#f87171;">–</span></div>
+  <div class="tick"><span class="tick-l">YOUR MATCHES </span><span class="tick-v">47 </span><span class="tick-u">+6 new</span></div>
+  <div class="tick"><span class="tick-l">BIDS WON MTD </span><span class="tick-v">3 </span><span class="tick-u">₹42.6L</span></div>
+  <div class="tick"><span class="tick-l">WIN RATE </span><span class="tick-v">61% </span><span class="tick-u">+4% MoM</span></div>
+  <div class="tick"><span class="tick-l">OPEN BIDS </span><span class="tick-v">7 </span><span class="tick-u">in progress</span></div>
+</div>
+
+<!-- TABS -->
+<div id="navtabs">
+  <button class="tab on" onclick="go('feed',this)">TENDER FEED</button>
+  <button class="tab" onclick="go('analysis',this)">AI ANALYSIS</button>
+  <button class="tab" onclick="go('eligibility',this)">ELIGIBILITY</button>
+  <button class="tab" onclick="go('price',this)">PRICE INTEL</button>
+  <button class="tab" onclick="go('alerts',this)">ALERTS <span class="badge">4</span></button>
+  <button class="tab" onclick="go('bids',this)">BID TRACKER</button>
+</div>
+
+<div id="content"></div>
+
+<script>
+// ── STATE ──────────────────────────────────────────────────────────────────
+const API = window.location.origin; // works both locally and on Railway
+let apiKey = localStorage.getItem("gem_api_key") || "";
+let tenders = [], stats = {}, selTender = null, curTab = "feed";
+let analysisCache = {}, priceCache = {};
+let searchQ = "", catQ = "", page = 1, totalPages = 1;
+
+// ── CLOCK ──────────────────────────────────────────────────────────────────
+setInterval(()=>{
+  document.getElementById("clock").textContent =
+    new Date().toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+},1000);
+
+// ── MODAL ──────────────────────────────────────────────────────────────────
+function saveKey(){
+  const k = document.getElementById("ki").value.trim();
+  if(!k.startsWith("sk-ant")){alert("Key should start with sk-ant-...");return;}
+  apiKey = k;
+  localStorage.setItem("gem_api_key", k);
+  document.getElementById("plan-pill").textContent = "PRO";
+  closeModal();
+  showToast("✓ API key saved — AI features activated");
+}
+function closeModal(){ document.getElementById("apimodal").style.display="none"; }
+function openModal(){ document.getElementById("apimodal").style.display="flex"; }
+if(apiKey){ closeModal(); document.getElementById("plan-pill").textContent="PRO"; }
+
+// ── TOAST ──────────────────────────────────────────────────────────────────
+function showToast(msg){
+  const el = document.getElementById("toast");
+  el.textContent = msg; el.classList.add("show");
+  setTimeout(()=>el.classList.remove("show"), 3000);
+}
+
+// ── API CALLS ──────────────────────────────────────────────────────────────
+async function fetchTenders(p=1){
+  try{
+    const params = new URLSearchParams({page:p,per_page:20});
+    if(searchQ) params.set("search",searchQ);
+    if(catQ && catQ!=="All") params.set("category",catQ);
+    const res = await fetch(`${API}/api/tenders?${params}`);
+    const data = await res.json();
+    tenders = data.tenders || [];
+    totalPages = data.total_pages || 1;
+    page = p;
+    const src = data.source || "demo";
+    if(src === "live") showToast("✓ Live GeM data loaded");
+    if(data.last_updated){
+      const d = new Date(data.last_updated);
+      document.getElementById("last-update").textContent = "Last updated: " + d.toLocaleTimeString("en-IN");
+    }
+    return data;
+  } catch(e){ console.error(e); return {}; }
+}
+
+async function fetchStats(){
+  try{
+    const res = await fetch(`${API}/api/stats`);
+    stats = await res.json();
+    document.getElementById("t-open").textContent = stats.open_tenders || "–";
+    document.getElementById("t-close").textContent = stats.closing_48h || "0";
+  } catch(e){}
+}
+
+async function analyzeAPI(id){
+  try{
+    const res = await fetch(`${API}/api/analyze/${id}`,{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({api_key: apiKey})
+    });
+    const data = await res.json();
+    return data.analysis;
+  } catch(e){ return null; }
+}
+
+async function fetchPrice(id){
+  try{
+    const res = await fetch(`${API}/api/price/${id}`);
+    return await res.json();
+  } catch(e){ return null; }
+}
+
+async function forceRefresh(){
+  showToast("⟳ Refreshing tenders from GeM...");
+  await fetch(`${API}/api/refresh`,{method:"POST"});
+  await loadAll();
+  showToast("✓ Refresh complete");
+}
+
+// ── TABS ──────────────────────────────────────────────────────────────────
+function go(tab, el){
+  document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
+  el.classList.add("on");
+  curTab = tab;
+  render();
+}
+
+function render(){
+  ({feed:renderFeed, analysis:renderAnalysis, eligibility:renderEligibility,
+    price:renderPrice, alerts:renderAlerts, bids:renderBids})[curTab]();
+}
+
+// ── FEED ──────────────────────────────────────────────────────────────────
+function renderFeed(){
+  const COLS = "1.1fr 1.5fr 1.6fr 0.5fr 0.7fr 0.6fr 0.5fr 0.7fr 0.7fr";
+  let html = `
+  <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">
+    <input placeholder="Search tenders, departments, product..." oninput="searchQ=this.value;fetchTenders(1).then(renderFeed)" value="${searchQ}" style="flex:1;min-width:220px;"/>
+    <select onchange="catQ=this.value;fetchTenders(1).then(renderFeed)" style="min-width:160px;">
+      <option value="All" ${catQ==="All"?"selected":""}>All Categories</option>
+      ${["IT Hardware","Security","Furniture","Networking","Medical Equipment","Solar Energy","Electrical","Stationery"].map(c=>`<option value="${c}" ${catQ===c?"selected":""}>${c}</option>`).join("")}
+    </select>
+    <span style="color:#444;font-size:11px;">${tenders.length} shown · Page ${page}/${totalPages}</span>
+  </div>
+
+  <div class="tbl-wrap">
+  <div class="tbl-head" style="grid-template-columns:${COLS};">
+    <div>TENDER ID</div><div>DEPARTMENT</div><div>PRODUCT</div><div>QTY</div><div>VALUE</div><div>EMD</div><div>DEADLINE</div><div>SOURCE</div><div>ACTION</div>
+  </div>`;
+
+  tenders.forEach(t=>{
+    const soon = t.deadline && (new Date(t.deadline)-new Date()) < 3*86400000;
+    const dlText = t.deadline ? (soon ? "⚠ SOON" : t.deadline.slice(5)) : "–";
+    const isLive = t.source === "live";
+    html += `<div class="trow${selTender&&selTender.id===t.id?" sel":""}" style="grid-template-columns:${COLS};" onclick="sel('${t.id}')">
+      <div class="c-id">${t.id}</div>
+      <div class="c-dept" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${t.dept}</div>
+      <div class="c-prod" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${t.product}</div>
+      <div style="color:#9ca3af;">${t.qty}</div>
+      <div class="c-val">₹${t.value_lakhs}L</div>
+      <div class="c-emd">₹${(t.emd/1000).toFixed(0)}K</div>
+      <div class="c-dl${soon?" soon":""}">${dlText}</div>
+      <div><span class="c-src ${isLive?"src-live":"src-demo"}">${isLive?"LIVE":"DEMO"}</span></div>
+      <div><button class="btn btn-ai" onclick="event.stopPropagation();aiGo('${t.id}')">AI →</button></div>
+    </div>`;
+  });
+  html += `</div>`;
+
+  // Pagination
+  html += `<div style="display:flex;gap:8px;margin-top:12px;align-items:center;">
+    <button class="btn btn-outline" onclick="fetchTenders(${page-1}).then(renderFeed)" ${page<=1?"disabled style='opacity:.4'":""}>← PREV</button>
+    <span style="color:#444;font-size:11px;">Page ${page} of ${totalPages}</span>
+    <button class="btn btn-outline" onclick="fetchTenders(${page+1}).then(renderFeed)" ${page>=totalPages?"disabled style='opacity:.4'":""}>NEXT →</button>
+  </div>`;
+
+  // Selected strip
+  if(selTender){
+    const mc = selTender.msme_preferred ? "#4ade80" : "#f5a623";
+    html += `<div id="sel-strip">
+      <div>
+        <div style="color:#444;font-size:10px;letter-spacing:1px;margin-bottom:3px;">SELECTED</div>
+        <div style="color:#f5a623;font-size:13px;font-weight:900;">${selTender.product}</div>
+        <div style="color:#9ca3af;font-size:11px;">${selTender.dept}</div>
+        <div style="color:#444;font-size:10px;margin-top:3px;">${selTender.category} · ${selTender.state}</div>
+      </div>
+      <div>
+        <div style="color:#444;font-size:10px;letter-spacing:1px;margin-bottom:6px;">VALUE · EMD · DEADLINE</div>
+        <div style="color:#4ade80;font-weight:900;font-size:16px;">₹${selTender.value_lakhs}L</div>
+        <div style="color:#fbbf24;font-size:12px;">EMD ₹${selTender.emd.toLocaleString("en-IN")}</div>
+        <div style="color:#888;font-size:11px;">${selTender.deadline || "–"}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <button class="btn btn-ai" style="padding:9px 20px;font-size:11px;" onclick="aiGo('${selTender.id}')">▶ AI ANALYSIS</button>
+        <button class="btn btn-outline" onclick="go('eligibility',document.querySelectorAll('.tab')[2])">ELIGIBILITY</button>
+        <button class="btn btn-blue" onclick="go('price',document.querySelectorAll('.tab')[3])">PRICE INTEL</button>
+      </div>
+    </div>`;
+  }
+
+  document.getElementById("content").innerHTML = html;
+}
+
+function sel(id){
+  selTender = tenders.find(t=>t.id===id);
+  renderFeed();
+}
+
+function aiGo(id){
+  selTender = tenders.find(t=>t.id===id) || selTender;
+  document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
+  document.querySelectorAll(".tab")[1].classList.add("on");
+  curTab = "analysis";
+  renderAnalysis(true);
+}
+
+// ── AI ANALYSIS ──────────────────────────────────────────────────────────
+async function renderAnalysis(fresh=false){
+  const t = selTender;
+  if(!t){
+    document.getElementById("content").innerHTML=`<div class="loader"><div class="spin">◈</div><div style="margin-top:16px;font-size:12px;letter-spacing:2px;">SELECT A TENDER FROM THE FEED TAB</div></div>`;
+    return;
+  }
+
+  if(!fresh && analysisCache[t.id]){ showAI(t, analysisCache[t.id]); return; }
+
+  document.getElementById("content").innerHTML=`<div class="loader"><div class="spin">◈</div><div style="margin-top:16px;font-size:12px;letter-spacing:2px;">AI ANALYZING TENDER...</div><div style="color:#444;font-size:10px;margin-top:6px;">${apiKey?"Using Claude AI":"Demo mode — add API key for real AI"}</div></div>`;
+
+  const result = await analyzeAPI(t.id);
+  if(result){ analysisCache[t.id] = result; showAI(t, result); }
+  else { document.getElementById("content").innerHTML=`<div class="loader" style="color:#f87171;">Analysis failed. Check API key or try again.</div>`; }
+}
+
+function showAI(t, r){
+  const vc = r.verdict?.includes("Good")?"":"" + (r.verdict?.includes("Avoid")?" avoid":" risky");
+  const vcol = r.verdict?.includes("Good")?"#4ade80":r.verdict?.includes("Risky")?"#f5a623":"#f87171";
+
+  document.getElementById("content").innerHTML = `
+  <div style="color:#444;font-size:11px;letter-spacing:1px;margin-bottom:12px;">AI ANALYSIS › ${t.id} › ${t.product}</div>
+
+  <div class="grid3" style="margin-bottom:12px;">
+    ${[["PRODUCT",t.product],["DEPARTMENT",t.dept],["QUANTITY",t.qty+" "+t.unit],["ESTIMATED VALUE","₹"+t.value_lakhs+"L"],["EMD","₹"+t.emd.toLocaleString("en-IN")],["DELIVERY",t.delivery_days+" days"]].map(([l,v])=>`
+      <div class="panel"><div class="panel-title">${l}</div><div style="font-size:12px;font-weight:700;color:#e8d5a3;">${v}</div></div>
+    `).join("")}
+  </div>
+
+  <div class="verdict-card${vc}" style="border-color:${vcol};">
+    <div>
+      <div style="color:#444;font-size:10px;letter-spacing:1px;margin-bottom:4px;">AI VERDICT</div>
+      <div class="verdict-text" style="color:${vcol};">${r.verdict}</div>
+      <div style="color:#9ca3af;font-size:11px;margin-top:8px;max-width:500px;">${r.verdict_reason}</div>
+    </div>
+    <div style="text-align:center;min-width:90px;">
+      <div style="color:#444;font-size:10px;letter-spacing:1px;">AI SCORE</div>
+      <div class="ai-score-num">${r.score}</div>
+      <div style="color:#444;font-size:10px;">/100</div>
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-bottom:12px;">
+    <div class="panel">
+      <div class="panel-title">KEY POINTS</div>
+      ${r.key_points?.map(p=>`<div class="kpoint">${p}</div>`).join("")}
+      ${r.red_flags?.length?`<div style="margin-top:10px;"><div style="color:#f87171;font-size:10px;letter-spacing:1px;margin-bottom:6px;">⚠ RED FLAGS</div>${r.red_flags.map(f=>`<div style="font-size:11px;color:#f87171;margin-bottom:4px;">• ${f}</div>`).join("")}</div>`:""}
+    </div>
+    <div class="panel">
+      <div class="panel-title">INTELLIGENCE</div>
+      ${[["Risk Level",r.risk_level,r.risk_level==="Low"?"#4ade80":r.risk_level==="Medium"?"#f5a623":"#f87171"],["Competition",r.competition_estimate,"#60a5fa"],["Est. Margin",r.profit_margin_estimate,"#4ade80"]].map(([l,v,c])=>`
+        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #111;font-size:11px;"><span style="color:#444;">${l}</span><span style="color:${c};font-weight:700;">${v}</span></div>
+      `).join("")}
+      <div style="margin-top:12px;"><div class="panel-title">DOCUMENTS NEEDED</div>
+      ${r.documents_needed?.map(d=>`<div style="font-size:11px;color:#888;margin-bottom:4px;">□ ${d}</div>`).join("")}</div>
+    </div>
+  </div>
+
+  <div class="tip-bar"><span style="color:#f5a623;font-size:10px;letter-spacing:1px;">⚡ STRATEGY TIP › </span>${r.strategy_tip}</div>
+
+  <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+    <button class="btn btn-outline" onclick="go('eligibility',document.querySelectorAll('.tab')[2])">CHECK ELIGIBILITY</button>
+    <button class="btn btn-blue" onclick="go('price',document.querySelectorAll('.tab')[3])">PRICE INTEL</button>
+    <button class="btn btn-green" onclick="dlDoc('cover_letter')">⬇ COVER LETTER</button>
+    <button class="btn btn-green" onclick="dlDoc('declaration')">⬇ DECLARATION</button>
+    <a href="${t.gem_url}" target="_blank"><button class="btn btn-outline" style="border-color:#60a5fa;color:#60a5fa;">VIEW ON GEM ↗</button></a>
+  </div>`;
+}
+
+// ── ELIGIBILITY ──────────────────────────────────────────────────────────
+function renderEligibility(){
+  const t = selTender;
+  if(!t){document.getElementById("content").innerHTML=`<div class="loader">Select a tender from Feed tab first</div>`;return;}
+
+  const checks = [
+    {label:"Company Age",req:`${t.delivery_days>30?"3":"2"} years`,have:"5 years",pass:true},
+    {label:"Annual Turnover",req:"₹1 Cr+",have:"₹2.4 Cr",pass:true},
+    {label:"GST Registration",req:"Active",have:"Active",pass:true},
+    {label:"ISO 9001:2015",req:"Preferred",have:"Not uploaded",pass:false},
+    {label:"Past Experience",req:"3 govt contracts",have:"4 contracts",pass:true},
+    {label:"MSME Certificate",req:t.msme_preferred?"Mandatory":"Optional",have:"Valid",pass:true},
+  ];
+  const passed = checks.filter(c=>c.pass).length;
+  const ok = passed >= 5;
+
+  document.getElementById("content").innerHTML = `
+  <div style="color:#444;font-size:11px;letter-spacing:1px;margin-bottom:14px;">ELIGIBILITY › ${t.product}</div>
+
+  <div style="border:1px solid ${ok?"#166534":"#7f1d1d"};background:${ok?"#071a0c":"#0f0606"};padding:16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
+    <div>
+      <div style="color:#444;font-size:10px;letter-spacing:1px;margin-bottom:4px;">ELIGIBILITY STATUS</div>
+      <div style="color:${ok?"#4ade80":"#f87171"};font-size:20px;font-weight:900;">${ok?"✓  ELIGIBLE":"✗  NOT ELIGIBLE"}</div>
+      <div style="color:#9ca3af;font-size:11px;margin-top:5px;">${passed}/${checks.length} requirements met${t.msme_preferred?" · MSME preference applies":""}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="color:#444;font-size:10px;">SCORE</div>
+      <div style="color:#f5a623;font-size:42px;font-weight:900;">${Math.round(passed/checks.length*100)}</div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    ${checks.map(c=>`
+      <div class="erow${c.pass?"":" fail"}">
+        <div>
+          <div style="color:#444;font-size:10px;letter-spacing:1px;">${c.label.toUpperCase()}</div>
+          <div style="color:#e8d5a3;font-size:12px;margin-top:3px;font-weight:600;">${c.have}</div>
+          <div style="color:#555;font-size:10px;margin-top:2px;">Required: ${c.req}</div>
+        </div>
+        <div class="echk ${c.pass?"pass-chk":"fail-chk"}">${c.pass?"✓":"✗"}</div>
+      </div>
+    `).join("")}
+  </div>
+
+  <div style="border:1px solid #92400e;background:#170e00;padding:14px;margin-top:14px;">
+    <div style="color:#f5a623;font-size:10px;letter-spacing:1.5px;margin-bottom:8px;">ACTION ITEMS</div>
+    <div style="font-size:11px;color:#d1d5db;margin-bottom:5px;">• Upload ISO 9001:2015 certificate to GeM profile to maximize score</div>
+    <div style="font-size:11px;color:#d1d5db;margin-bottom:5px;">• Ensure GSTIN is active and updated on GeM seller portal</div>
+    <div style="font-size:11px;color:#d1d5db;">• Keep experience certificates (past 3 govt orders) ready for submission</div>
+  </div>`;
+}
+
+// ── PRICE INTEL ──────────────────────────────────────────────────────────
+async function renderPrice(){
+  const t = selTender;
+  if(!t){document.getElementById("content").innerHTML=`<div class="loader">Select a tender from Feed tab first</div>`;return;}
+
+  document.getElementById("content").innerHTML=`<div class="loader"><div class="spin">◈</div><div style="margin-top:12px;font-size:12px;">LOADING PRICE INTELLIGENCE...</div></div>`;
+
+  let pd = priceCache[t.id];
+  if(!pd){ pd = await fetchPrice(t.id); if(pd) priceCache[t.id]=pd; }
+  if(!pd){document.getElementById("content").innerHTML=`<div class="loader" style="color:#f87171;">Price data unavailable</div>`;return;}
+
+  document.getElementById("content").innerHTML = `
+  <div style="color:#444;font-size:11px;letter-spacing:1px;margin-bottom:14px;">PRICE INTELLIGENCE › ${t.product.toUpperCase()}</div>
+  <div class="grid2">
+    <div>
+      <div class="panel-title">WIN PROBABILITY vs BID PRICE</div>
+      ${pd.recommendations.map(p=>`
+        <div class="prow${p.is_recommended?" rec":""}">
+          <div style="width:88px;color:#f5a623;font-size:12px;font-weight:${p.is_recommended?900:400};">₹${p.price_per_unit.toLocaleString("en-IN")}</div>
+          <div class="pbar-bg"><div class="pbar-fill" style="width:${p.win_probability}%;background:${p.win_probability>80?"#4ade80":p.win_probability>50?"#f5a623":"#f87171"};"></div></div>
+          <div style="width:32px;text-align:right;font-size:11px;font-weight:700;color:${p.win_probability>80?"#4ade80":p.win_probability>50?"#f5a623":"#f87171"};">${p.win_probability}%</div>
+          <div style="width:110px;font-size:10px;color:${p.is_recommended?"#4ade80":"#555"};">${p.is_recommended?"◀ RECOMMENDED":p.label}</div>
+        </div>
+      `).join("")}
+
+      <div style="border:1px solid #166534;background:#071a0c;padding:14px;margin-top:14px;">
+        <div style="color:#4ade80;font-size:10px;letter-spacing:1.5px;margin-bottom:4px;">⚡ OPTIMAL BID</div>
+        <div style="color:#fff;font-size:28px;font-weight:900;">₹${pd.optimal_price.toLocaleString("en-IN")} <span style="font-size:14px;color:#4ade80;">per unit</span></div>
+        <div style="color:#9ca3af;font-size:11px;margin-top:4px;">
+          Total bid: ₹${((pd.optimal_price * t.qty)/100000).toFixed(2)}L · Qty ${t.qty} ${t.unit}
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel-title">MARKET INTELLIGENCE</div>
+      ${Object.entries(pd.market_intel).map(([k,v])=>`
+        <div style="display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #111;font-size:11px;">
+          <span style="color:#444;text-transform:capitalize;">${k.replace(/_/g," ")}</span>
+          <span style="color:#e8d5a3;font-weight:700;max-width:200px;text-align:right;">${v}</span>
+        </div>
+      `).join("")}
+      <div style="margin-top:16px;">
+        <div class="panel-title">PRICE CHART</div>
+        <canvas id="pchart" height="120"></canvas>
+      </div>
+    </div>
+  </div>`;
+
+  setTimeout(()=>{
+    const ctx = document.getElementById("pchart");
+    if(!ctx) return;
+    new Chart(ctx,{
+      type:"bar",
+      data:{
+        labels: pd.recommendations.map(r=>r.win_probability+"%"),
+        datasets:[{
+          data: pd.recommendations.map(r=>r.price_per_unit),
+          backgroundColor: pd.recommendations.map(r=>r.is_recommended?"#f5a623":"#1a1f26"),
+          borderWidth:0
+        }]
+      },
+      options:{plugins:{legend:{display:false}},scales:{
+        x:{grid:{color:"#111"},ticks:{color:"#444",font:{size:9}}},
+        y:{grid:{color:"#111"},ticks:{color:"#444",font:{size:9},callback:v=>"₹"+v.toLocaleString("en-IN")}}
+      }}
+    });
+  }, 100);
+}
+
+// ── ALERTS ──────────────────────────────────────────────────────────────
+function renderAlerts(){
+  const ALERTS = [
+    {type:"match",time:"2 min ago",msg:"New Tender: 50 Printers – Rajasthan Education Dept – ₹18L matched your profile"},
+    {type:"urgent",time:"18 min ago",msg:"DEADLINE ALERT: Tender GEM/2025/B/5709 closes in 3 days — Submit bid now!"},
+    {type:"price",time:"1 hr ago",msg:"Price Drop: Desktop Computers – market rate fell 3.2% · Update your bids"},
+    {type:"match",time:"3 hrs ago",msg:"Eligibility Confirmed: GEM/2025/B/5754 – You qualify! MSME preference applies."},
+  ];
+
+  document.getElementById("content").innerHTML = `
+  <div style="color:#444;font-size:11px;letter-spacing:1px;margin-bottom:14px;">NOTIFICATION CENTER</div>
+  <div class="grid4" style="margin-bottom:18px;">
+    ${[["✉","Email","Connected"],["◉","WhatsApp","Active"],["✈","Telegram","Active"],["◈","Dashboard","Live"]].map(([ic,ch,st])=>`
+      <div class="panel" style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="display:flex;gap:8px;align-items:center;"><span style="color:#f5a623;font-size:16px;">${ic}</span><span style="font-size:12px;">${ch}</span></div>
+        <span style="color:#4ade80;font-size:10px;">● ${st}</span>
+      </div>`).join("")}
+  </div>
+
+  <div class="panel-title">RECENT ALERTS</div>
+  ${ALERTS.map(a=>`
+    <div class="arow ${a.type}">
+      <span style="color:#444;font-size:10px;white-space:nowrap;margin-top:1px;">${a.time}</span>
+      <span style="color:#e8d5a3;">${a.msg}</span>
+      ${a.type==="urgent"?`<span style="color:#f87171;margin-left:auto;font-size:10px;white-space:nowrap;font-weight:700;">URGENT</span>`:""}
+      ${a.type==="match"?`<span style="color:#4ade80;margin-left:auto;font-size:10px;white-space:nowrap;font-weight:700;">NEW</span>`:""}
+    </div>
+  `).join("")}
+
+  <div style="margin-top:20px;" class="panel">
+    <div class="panel-title">CONFIGURE ALERTS</div>
+    <div style="font-size:11px;color:#9ca3af;margin-bottom:12px;">Set up WhatsApp & Email alerts for new tender matches</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      <input placeholder="Your WhatsApp (+91 XXXXXXXXXX)"/>
+      <input placeholder="Your Email address"/>
+    </div>
+    <button class="btn btn-ai" style="margin-top:10px;padding:8px 18px;font-size:11px;">SAVE ALERT PREFERENCES</button>
+  </div>`;
+}
+
+// ── BIDS ──────────────────────────────────────────────────────────────────
+function renderBids(){
+  const BIDS = [
+    {id:"GEM/2025/B/4821",prod:"Network Switches",dept:"ONGC",amt:"8.4L",date:"Mar 1",status:"pending",prob:65},
+    {id:"GEM/2025/B/4745",prod:"CCTV Cameras",dept:"Delhi Metro",amt:"22.8L",date:"Feb 22",status:"won",prob:100},
+    {id:"GEM/2025/B/4692",prod:"Laptops Core i5",dept:"CBSE",amt:"47.5L",date:"Feb 18",status:"lost",prob:0},
+    {id:"GEM/2025/B/4610",prod:"Printers LaserJet",dept:"Haryana PWD",amt:"14.2L",date:"Feb 10",status:"won",prob:100},
+    {id:"GEM/2025/B/4589",prod:"Desktop PCs",dept:"AIIMS Delhi",amt:"38.0L",date:"Feb 8",status:"pending",prob:72},
+  ];
+  const won=BIDS.filter(b=>b.status==="won").length, lost=BIDS.filter(b=>b.status==="lost").length;
+
+  document.getElementById("content").innerHTML=`
+  <div style="color:#444;font-size:11px;letter-spacing:1px;margin-bottom:14px;">BID TRACKER</div>
+  <div class="grid4" style="margin-bottom:18px;">
+    ${[["TOTAL BIDS",BIDS.length,"#e8d5a3"],["WON",won,"#4ade80"],["LOST",lost,"#f87171"],["WIN RATE",Math.round(won/BIDS.length*100)+"%","#f5a623"]].map(([l,v,c])=>`
+      <div class="scard"><div class="scard-label">${l}</div><div class="scard-val" style="color:${c};">${v}</div></div>
+    `).join("")}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1.1fr 1.4fr 1.2fr 0.7fr 0.7fr 0.8fr 0.9fr;gap:8px;padding:7px 14px;background:#0f1318;font-size:10px;color:#444;letter-spacing:1px;border:1px solid #1a1f26;margin-bottom:2px;">
+    ${["TENDER ID","PRODUCT","DEPARTMENT","AMOUNT","DATE","STATUS","WIN PROB"].map(h=>`<div>${h}</div>`).join("")}
+  </div>
+  ${BIDS.map(b=>`
+    <div style="display:grid;grid-template-columns:1.1fr 1.4fr 1.2fr 0.7fr 0.7fr 0.8fr 0.9fr;gap:8px;padding:10px 14px;border-bottom:1px solid #111;font-size:11px;align-items:center;">
+      <div class="c-id">${b.id}</div>
+      <div style="color:#e8d5a3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${b.prod}</div>
+      <div style="color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${b.dept}</div>
+      <div style="color:#4ade80;font-weight:700;">₹${b.amt}</div>
+      <div style="color:#555;">${b.date}</div>
+      <div class="${b.status==="won"?"bid-won":b.status==="lost"?"bid-lost":"bid-pend"}">${b.status.toUpperCase()}</div>
+      <div style="display:flex;align-items:center;gap:5px;">
+        ${b.status==="pending"?`<div style="flex:1;height:5px;background:#1a1f26;"><div style="width:${b.prob}%;height:100%;background:#f5a623;"></div></div><span style="color:#f5a623;font-size:10px;">${b.prob}%</span>`:`<span style="color:#555;font-size:10px;">${b.status==="won"?"✓ WON":"✗ LOST"}</span>`}
+      </div>
+    </div>
+  `).join("")}`;
+}
+
+// ── DOCUMENT GENERATOR ────────────────────────────────────────────────────
+function dlDoc(type){
+  const t = selTender; if(!t){alert("Select a tender first");return;}
+  const d = new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"long",year:"numeric"});
+  let txt = type==="cover_letter" ? `COVER LETTER
+Date: ${d}  |  Tender: ${t.id}
+
+To,
+${t.dept}
+
+Sub: Bid Submission for ${t.product}
+
+We are pleased to submit our bid for ${t.qty} ${t.unit} of ${t.product}.
+
+Company: [YOUR COMPANY NAME]
+GeM Seller ID: [YOUR GEM ID]
+GSTIN: [YOUR GSTIN]
+MSME: [Yes/No]
+
+Our bid price: ₹[YOUR PRICE] per unit
+Delivery: Within ${t.delivery_days} days
+
+Thanking you,
+[Name] | [Designation] | [Company] | [Phone] | [Email]
+` : `DECLARATION FORM
+Date: ${d}  |  Tender: ${t.id}
+
+To, ${t.dept}
+
+We, [COMPANY NAME] (GSTIN: [GSTIN]) hereby declare:
+1. Not blacklisted by any Government department.
+2. Financial & technical capacity to execute this order.
+3. All information submitted is true and correct.
+4. We accept all tender terms and conditions.
+5. Registered on GeM portal with updated profile.
+
+Product: ${t.product} | Qty: ${t.qty} ${t.unit}
+
+Signature: _________________ | Seal:
+Name: [Name] | Date: ${d}
+`;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([txt],{type:"text/plain"}));
+  a.download = `${type}_${t.id}.txt`; a.click();
+  showToast(`✓ ${type.replace("_"," ")} downloaded`);
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────
+async function loadAll(){
+  await Promise.all([fetchStats(), fetchTenders(1)]);
+  if(tenders.length) selTender = tenders[0];
+  render();
+}
+
+loadAll();
+// Auto-refresh every 5 minutes
+setInterval(()=>{ fetchStats(); fetchTenders(page); }, 5*60*1000);
+</script>
+</body>
+</html>
+
+"""
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    try:
-        html_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
-        with open(html_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    except Exception as e:
-        return HTMLResponse(content="<h1>GEM·AI Running ✅ Error: " + str(e) + "</h1>")
-
+    return HTMLResponse(content=GEM_HTML)
 
 @app.get("/api/tenders")
 async def get_tenders(
