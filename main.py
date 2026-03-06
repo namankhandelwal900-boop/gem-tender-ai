@@ -192,8 +192,10 @@ async def refresh_tenders():
 
 @app.on_event("startup")
 async def startup():
-    """Load tenders on startup"""
-    await refresh_tenders()
+    global TENDERS_DB, LAST_SCRAPED
+    TENDERS_DB = get_fallback_tenders()
+    LAST_SCRAPED = datetime.utcnow()
+    asyncio.create_task(refresh_tenders())
 
 @app.get("/health")
 async def health():
