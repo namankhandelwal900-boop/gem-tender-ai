@@ -195,7 +195,9 @@ async def startup():
     """Load tenders on startup"""
     await refresh_tenders()
 
-
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 @app.get("/")
 async def root():
     return FileResponse("templates/index.html")
