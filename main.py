@@ -200,9 +200,14 @@ async def startup():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    return FileResponse("templates/index.html")
+    try:
+        html_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
+        with open(html_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except Exception as e:
+        return HTMLResponse(content="<h1>GEM·AI Running ✅ Error: " + str(e) + "</h1>")
 
 
 @app.get("/api/tenders")
